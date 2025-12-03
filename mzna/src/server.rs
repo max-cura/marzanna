@@ -13,6 +13,7 @@ enum Invocation {
 
 mod bind {
     use clap::Args;
+    use futures::stream::unfold;
     use hickory_client::{
         client::{Client, ClientHandle as _},
         proto::{
@@ -22,12 +23,13 @@ mod bind {
         },
     };
     use hickory_resolver::Name;
-    use marzanna::{Session, driver::DriverError};
-    use std::{path::PathBuf, str::FromStr as _};
+    use marzanna::driver::DriverError;
+    use std::{collections::BTreeMap, path::PathBuf, pin::pin, str::FromStr as _};
     use tokio::sync::{
         mpsc::{self, OwnedPermit},
         oneshot,
     };
+    use marzanna::session::Session;
 
     #[derive(Debug, Args)]
     pub struct Opts {
@@ -41,7 +43,7 @@ mod bind {
     pub async fn invoke(opts: Opts) -> eyre::Result<()> {
         let session: Session = serde_json::from_str(&std::fs::read_to_string(opts.session)?)?;
 
-        let (ev_tx, mut ev_rx) = mpsc::channel(128);
+        let (ev_tx, ev_rx) = mpsc::channel(128);
         let (term_tx, term_rx) = oneshot::channel();
 
         let resolver = session.resolver();
@@ -76,21 +78,39 @@ mod bind {
             term_rx,
         );
 
-        let mut ctrl_c = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let ctrl_c = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
-        loop {
-            let ev = tokio::select! {
-                _ = ctrl_c.recv() => {
-                    println!("Received ^C, exiting");
-                    break
-                }
-                ev = ev_rx.recv() => {
-                    ev
-                }
-            };
-            tracing::debug!("received event {ev:?}");
+        type Event = (usize, bool);
+
+        use tokio_stream::StreamExt;
+        enum Message {
+            Stop,
+            Recv(#[allow(unused)] Result<Event, DriverError>),
         }
-
+        let a = unfold(ctrl_c, |mut x| async {
+            x.recv().await;
+            Some((Message::Stop, x))
+        });
+        let b = unfold(ev_rx, |mut x| async {
+            Some((
+                Message::Recv(x.recv().await.ok_or(DriverError::QueueClosed).flatten()),
+                x,
+            ))
+        });
+        let mut s = pin!(a.merge(b));
+        let mut reassembly = BTreeMap::new();
+        while let Some(msg) = s.next().await {
+            match msg {
+                Message::Stop => break,
+                Message::Recv(Ok((idx, bit))) => {
+                    tracing::info!("received event: bit at index {idx} is {bit:?}");
+                    reassembly.insert(idx, bit);
+                }
+                Message::Recv(Err(e)) => {
+                    tracing::error!("received event: {e:?}");
+                }
+            }
+        }
         let _ = term_tx.send(());
 
         let (_session, _unfinished_rendezvous, _res) = jh.await?;

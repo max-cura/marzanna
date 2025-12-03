@@ -2,14 +2,15 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::{
     sync::{
-        mpsc::{self, OwnedPermit, error::TrySendError},
+        mpsc::{self, error::TrySendError, OwnedPermit},
         oneshot,
     },
     task::JoinHandle,
-    time::{Instant, sleep_until},
+    time::{sleep_until, Instant},
 };
 
-use crate::{Rendezvous, Session};
+use crate::Rendezvous;
+use crate::session::{Party, Session};
 
 #[derive(Debug, Error)]
 pub enum DriverError {
@@ -30,11 +31,12 @@ pub fn drive<T: Send + 'static>(
     mut event_fn: impl FnMut(Rendezvous, OwnedPermit<Result<T, DriverError>>) + Send + 'static,
     event_send: mpsc::Sender<Result<T, DriverError>>,
     mut terminate_recv: oneshot::Receiver<()>,
+    party: Party,
 ) -> JoinHandle<(Session, Rendezvous, Result<(), DriverError>)> {
     tokio::spawn(async move {
         let mut rendezvous;
         loop {
-            rendezvous = session.next_rendezvous();
+            rendezvous = session.next_rendezvous(party);
             let event_permit = match event_send.clone().try_reserve_owned() {
                 Ok(ev_p) => ev_p,
                 Err(e) => {

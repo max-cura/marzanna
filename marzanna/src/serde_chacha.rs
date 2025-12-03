@@ -1,3 +1,5 @@
+//! Serialization for [`ChaCha20Rng`], for use with `#[serde(with="serde_chacha")]`.
+
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;

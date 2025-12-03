@@ -28,24 +28,21 @@ mod send {
     };
     use hickory_resolver::Name;
     use marzanna::{
-        Session,
         codec::{Codec, DynCodec},
         driver::DriverError,
         sequencer::{
-            DynSequencerCore,
             ortho::{
-                DynDomainSequencer, DynTimeSequencer, Ortho, domain::UniformNSL,
-                time::UniformOffset,
+                domain::UniformNSL, time::UniformOffset, DynDomainSequencer, DynTimeSequencer,
+                Ortho,
             },
+            DynSequencerCore,
         },
     };
-    use tokio::{
-        sync::{
-            mpsc::{self, OwnedPermit},
-            oneshot,
-        },
-        time::Instant,
+    use tokio::sync::{
+        mpsc::{self, OwnedPermit},
+        oneshot,
     };
+    use marzanna::session::Session;
 
     #[derive(Debug, Args)]
     pub struct Opts {
@@ -61,15 +58,19 @@ mod send {
     }
 
     pub async fn invoke(opts: Opts) -> eyre::Result<()> {
-        let epoch_instant = Instant::now();
         let delay = fundu::DurationParser::new().parse(&opts.delay)?;
 
         let mut session = Session::fresh(
             Utc::now() + TimeDelta::try_from(delay)?,
             DynSequencerCore::Ortho(Ortho::fresh(
-                DynTimeSequencer::UniformOffset(UniformOffset::new(1, 10)),
+                DynTimeSequencer::UniformOffset(UniformOffset::new(4, 12)),
                 DynDomainSequencer::UniformNSL(UniformNSL::new(10, ".com")),
-                TimeDelta::seconds(10),
+                TimeDelta::seconds(3),
+            )),
+            DynSequencerCore::Ortho(Ortho::fresh(
+                DynTimeSequencer::UniformOffset(UniformOffset::new(4, 12)),
+                DynDomainSequencer::UniformNSL(UniformNSL::new(10, ".com")),
+                TimeDelta::seconds(3),
             )),
             DynCodec::Simple7x1(marzanna::codec::Simple7x1),
             opts.resolver,
@@ -106,7 +107,7 @@ mod send {
                 let bits = bits.clone();
                 let _ = tokio::spawn(async move {
                     let bit = bits[rendezvous.idx()];
-                    tracing::trace!("event for idx={}: {:?}", rendezvous.idx(), bit);
+                    tracing::debug!("event for idx={}: {:?}", rendezvous.idx(), bit);
 
                     if bit {
                         let conn =
