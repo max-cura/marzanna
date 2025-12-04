@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{TimeDelta, Utc};
 use clap::Args;
 use eyre::Context;
 use marzanna::Sequencer;
@@ -60,7 +60,7 @@ pub async fn invoke(opts: Opts) -> eyre::Result<()> {
         .wrap_err("failed to parse rtt")?;
 
     let session = Session::fresh(
-        Utc::now(),
+        Utc::now() + TimeDelta::seconds(10),
         build_sequencer(&opts),
         build_sequencer(&opts),
         codec,

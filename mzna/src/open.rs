@@ -51,11 +51,19 @@ impl Opts {
     }
 }
 
+#[derive(Debug, Default)]
+struct Stats {
+    neg_from_close: [u64; 2],
+    pos_from_close: [u64; 2],
+}
+
 pub async fn invoke(opts: Opts) -> eyre::Result<()> {
     let session_file_contents =
         std::fs::read_to_string(&opts.session).wrap_err("failed to read session file")?;
     let mut session: Session =
         serde_json::from_str(&session_file_contents).wrap_err("failed to parse session file")?;
+
+    let mut stats = Stats::default();
 
     let (out_msg_tx, out_msg_rx) = unbounded_channel();
     let (in_msg_tx, in_msg_rx) = unbounded_channel();
@@ -105,10 +113,10 @@ fn drive_stdio(opts: &Opts, msg_tx: UnboundedSender<OutgoingMsg>, mut msg_rx: Un
                             let _ = writeln!(stdout, "{}", String::from_utf8_lossy(bytes.as_ref()));
                         }
                         Some(IncomingMsg::Miss { receiving_party,rendezvous_idx,rendezvous_time: _,arrival_time: _ }) => {
-                            tracing::warn!("missed {} {} window",
-                                rendezvous_idx.to_ordinal_string(),
-                                if receiving_party == self_party { "receive" } else { "send" }
-                            );
+                            // tracing::warn!("missed {} {} window",
+                            //     rendezvous_idx.to_ordinal_string(),
+                            //     if receiving_party == self_party { "receive" } else { "send" }
+                            // );
                         }
                         None => {
                             tracing::debug!("incoming message queue closed; terminating stdio driver");
@@ -176,151 +184,6 @@ fn drive_protocol(
 ) ->
     JoinHandle<DynCodec>
 {
-    tracing::trace!(recv_is_up_to_idx);
-    type Key = aes_gcm_siv::Key<Aes256GcmSiv>;
-    const TAG_BYTES: usize = 16;
-    assert_eq!(
-        TAG_BYTES,
-        <<Aes256GcmSiv as AeadCore>::TagSize as ToInt<usize>>::to_int()
-    );
-    static PREAMBLE_BITS: [bool; 24] = [
-        // false, false, false, false,
-        // false, false, false, false,
-        true, true, true, true,
-        true, true, true, true,
-        true, true, true, true,
-        true, true, true, true,
-        true, true, true, true,
-        true, true, false, true,
-    ];
-    fn maintain_preamble(buf: &mut VecDeque<bool>) -> bool {
-        while buf.len() >= 24 {
-            if let Some(first_diff) = buf.iter().zip(PREAMBLE_BITS.iter()).position(|(found, expect)| found != expect) {
-                if first_diff == 22 {
-                    buf.pop_front();
-                } else if first_diff == 23 {
-                    buf.truncate_front(buf.len() - 24);
-                } else {
-                    // 1111 1111 10 fd=9, truncate=10
-                    buf.truncate_front(buf.len() - first_diff - 1);
-                }
-            } else {
-                buf.truncate_front(buf.len() - 24);
-                return true
-            }
-            // if let Some(first_true) = buf.iter().position(|&x| x == true) {
-            //     // tracing::trace!("ft=={first_true}");
-            //     if first_true == 4 {
-            //         if let Some(first_diff) = buf.iter().zip(PREAMBLE_BITS.iter()).position(|(found, expected)| found != expected) {
-            //             // tracing::trace!("fd=={first_diff}");
-            //             if first_diff == 22 {
-            //                 // Case: 0000 0000 1111 1111 1111 111 fd=22, remove 23
-            //                 buf.truncate_front(buf.len() - 23);
-            //             } else if first_diff == 23 {
-            //                 // Case: 0000 0000 1111 1111 1111 1100 fd=23 remove 22
-            //                 buf.truncate_front(buf.len() - 22);
-            //             } else {
-            //                 // Case: 0000 0000 110 fd=10, remove 10
-            //                 buf.truncate_front(buf.len() - first_diff);
-            //             }
-            //         } else {
-            //             // preamble matches
-            //             buf.truncate_front(buf.len() - 24);
-            //             return true
-            //         }
-            //     } else if first_true > 4 {
-            //         // Example: 0000 0000 001 ft=10, remove 2
-            //         let remove_extraneous_false_count = first_true - 4;
-            //         buf.truncate_front(buf.len() - remove_extraneous_false_count);
-            //     } else /* first_true < 4 */ {
-            //         // Example: 0001 ft=3, remove 4
-            //         buf.truncate_front(buf.len() - (first_true + 1));
-            //     }
-            // } else {
-            //     // Case: entire buffer is `false`s, so truncate it to the last 8 `false`s
-            //     buf.truncate_front(4);
-            // }
-        }
-        false
-    }
-    // 96-bit nonces
-    static LENGTH_NONCE: &[u8] = b"lengthlength";
-    static PAYLOAD_NONCE: &[u8] = b"payloadpaylo";
-    fn build_frame(shared_key: &[u8], codec: &mut DynCodec, out_msg: Bytes) -> Vec<bool> {
-        let salt: [u8; SALT_BYTES] = rand_chacha::ChaCha20Rng::from_os_rng().random();
-        let key = derive_key(Bytes::from_owner(salt), shared_key);
-        let cipher = Aes256GcmSiv::new(&key);
-
-        let mut frame = PREAMBLE_BITS.to_vec();
-        let after = frame.len();
-
-        // salt
-        tracing::debug!("salt={}", hex::encode(&salt));
-        frame.extend(std::iter::repeat_n(false, codec.required_bits(SALT_BYTES)));
-        codec.encode(&Bytes::from_owner(salt), &mut frame[after..]);
-        let after = frame.len();
-        // tracing::debug!("frame={}", frame.iter().map(|x| if *x { "1" } else { "0" }).collect::<String>());
-
-        // length + tag
-        assert!(
-            out_msg.len() < u32::MAX as usize,
-            "outgoing message too large"
-        );
-        let len_bytes = Bytes::from(
-            cipher
-                .encrypt(
-                    aes_gcm_siv::Nonce::from_slice(LENGTH_NONCE),
-                    u32::try_from(out_msg.len())
-                        .expect("length <= u32::MAX")
-                        .to_le_bytes()
-                        .as_slice(),
-                )
-                .expect("failed to encrypt"),
-        );
-        tracing::debug!("length+tag={}", hex::encode(&len_bytes));
-        frame.extend(std::iter::repeat_n(false, codec.required_bits(len_bytes.len())));
-        codec.encode(&len_bytes, &mut frame[after..]);
-        let after = frame.len();
-
-        // payload + tag
-        let payload_bytes = Bytes::from(
-            cipher
-                .encrypt(PAYLOAD_NONCE.into(), out_msg.as_ref())
-                .expect("failed to encrypt"),
-        );
-        tracing::debug!("payload+tag={}", hex::encode(&payload_bytes));
-        frame.extend(std::iter::repeat_n(
-            false,
-            codec.required_bits(payload_bytes.len()),
-        ));
-        codec.encode(&payload_bytes, &mut frame[after..]);
-
-        frame
-    }
-    const SALT_BYTES: usize = 16;
-    fn derive_key(salt: Bytes, shared_key: &[u8]) -> Key {
-        let mut okm = [0u8; 42];
-        let derived = Hkdf::<Sha256>::new(Some(&salt[..]), shared_key);
-        derived
-            .expand(b"derived", &mut okm)
-            .expect("42 is a valid length for Sha256 to output");
-        // AES256-GCM-SIV wants a 32-byte key
-        let mut key_bits = [0u8; 32];
-        key_bits[..32].copy_from_slice(&okm[..32]);
-        Key::from(key_bits)
-    }
-    fn maintain_bytes(codec: &mut DynCodec, buf: &mut VecDeque<bool>, len: usize) -> Option<Bytes> {
-        let len_bits = codec.required_bits(len);
-        if len_bits <= buf.len() {
-            let take: Vec<bool> = buf.drain(..len_bits).collect();
-            let mut o_buf = BytesMut::new();
-            codec.decode(&take, &mut o_buf);
-            // tracing::debug!("len={len} len_bits={} take={} o_buf={}", len_bits, take.iter().map(|x| if *x { "1" } else { "0" }).collect::<String>(), hex::encode(&o_buf));
-            Some(o_buf.into())
-        } else {
-            None
-        }
-    }
 
     let (_self_party, other_party) = opts.parties();
 
@@ -332,6 +195,10 @@ fn drive_protocol(
     enum PS {
         Len,
         Payload(usize),
+    }
+
+    for i in 0u64..1000 {
+        let _ = outgoing_tx.send(OutgoingBit::Bit(i.is_multiple_of(2)));
     }
 
     let handle = tokio::spawn(async move {
@@ -347,13 +214,13 @@ fn drive_protocol(
                     if let Some(out_msg) = out_msg {
                         match out_msg {
                             OutgoingMsg::Msg(bytes) => {
-                                let bits = build_frame(&shared_key, &mut codec, bytes);
-                                for bit in bits {
-                                    if let Err(_) = outgoing_tx.send(OutgoingBit::Bit(bit)) {
-                                        tracing::debug!("outgoing bit queue closed, stopping protocol driver task");
-                                        break
-                                    }
-                                }
+                                // let bits = build_frame(&shared_key, &mut codec, bytes);
+                                // for bit in bits {
+                                //     if let Err(_) = outgoing_tx.send(OutgoingBit::Bit(bit)) {
+                                //         tracing::debug!("outgoing bit queue closed, stopping protocol driver task");
+                                //         break
+                                //     }
+                                // }
                             }
                             OutgoingMsg::Close => {
                                 let _ = outgoing_tx.send(OutgoingBit::Close);
@@ -386,15 +253,18 @@ fn drive_protocol(
                                 (rendezvous_idx, /* arbitrary */ false)
                             }
                         };
+                        if idx.is_multiple_of(2) != bit {
+                            tracing::error!("BIT FLIP OBSERVED: INDEX={idx}");
+                        }
                         if idx == bb_upto {
                             bit_buffer.push_back(bit);
                             bb_upto += 1;
                         } else {
-                            tracing::trace!("mismatch: bb_upto={bb_upto} idx={idx} bit={bit:?}");
+                            // tracing::trace!("mismatch: bb_upto={bb_upto} idx={idx} bit={bit:?}");
                             receive_ahead.insert(idx, bit);
                         }
                         while let Some(entry) = receive_ahead.first_entry() {
-                            tracing::trace!("upto={} recv_ahead.fst=({},{:?})", bb_upto, *entry.key(), *entry.get());
+                            // tracing::trace!("upto={} recv_ahead.fst=({},{:?})", bb_upto, *entry.key(), *entry.get());
                             if *entry.key() == bb_upto {
                                 let (_idx, bit) = entry.remove_entry();
                                 bit_buffer.push_back(bit);
@@ -403,79 +273,13 @@ fn drive_protocol(
                                 break
                             }
                         }
-                        tracing::trace!("bit_buf={}",
-                            bit_buffer.iter().map(|x| if *x { "1" } else { "0" }).collect::<String>(),
-                        );
+                        // tracing::trace!("bit_buf={}",
+                        //     bit_buffer.iter().map(|x| if *x { "1" } else { "0" }).collect::<String>(),
+                        // );
+                        bit_buffer.clear();
                         loop {
-                            // repeat the loop until the length of bit_buffer no longer changes
-                            let bblen_mark = bit_buffer.len();
-                            state = match state {
-                                FS::Initial => {
-                                    if maintain_preamble(&mut bit_buffer) {
-                                        tracing::debug!("state change <- SALT");
-                                        FS::Salt
-                                    } else {
-                                        FS::Initial
-                                    }
-                                },
-                                FS::Salt => {
-                                    if let Some(salt) = maintain_bytes(&mut codec, &mut bit_buffer, SALT_BYTES) {
-                                        tracing::debug!("state change <- LEN, salt={}", hex::encode(&salt));
-                                        let key = derive_key(salt, &shared_key);
-                                        let cipher = Aes256GcmSiv::new(&key);
-                                        FS::Salted {
-                                            cipher,
-                                            proto: PS::Len,
-                                        }
-                                    } else {
-                                        FS::Salt
-                                    }
-                                },
-                                FS::Salted { cipher, proto } => match proto {
-                                    PS::Len => {
-                                        if let Some(len_ct) = maintain_bytes(&mut codec, &mut bit_buffer, 4 + TAG_BYTES) {
-                                            tracing::debug!("len_ct={}", hex::encode(&len_ct));
-                                            match cipher.decrypt(LENGTH_NONCE.into(), len_ct.as_ref()) {
-                                                Ok(pt) => {
-                                                    let len_usize = u32::from_le_bytes(pt.try_into().expect("length ciphertext should decrypt to 4 bytes")) as usize;
-                                                    tracing::debug!("state change <- PAYLOAD({len_usize})");
-                                                    FS::Salted {
-                                                        cipher,
-                                                        proto: PS::Payload(len_usize),
-                                                    }
-                                                }
-                                                Err(aes_gcm_siv::aead::Error) => {
-                                                    tracing::warn!("invalid length tag, discarding message");
-                                                    FS::Initial
-                                                }
-                                            }
-                                        } else {
-                                            FS::Salted { cipher, proto: PS::Len }
-                                        }
-                                    }
-                                    PS::Payload(len) => {
-                                        if let Some(payload_ct) = maintain_bytes(&mut codec, &mut bit_buffer, len + TAG_BYTES) {
-                                            tracing::debug!("payload_ct={}", hex::encode(&payload_ct));
-                                            match cipher.decrypt(PAYLOAD_NONCE.into(), payload_ct.as_ref()) {
-                                                Ok(pt) => {
-                                                    if let Err(_) = in_msg_tx.send(IncomingMsg::Msg(pt.into())) {
-                                                        tracing::debug!("incoming message queue closed, stopping protocol driver task");
-                                                        break 'outer
-                                                    }
-                                                }
-                                                Err(aes_gcm_siv::aead::Error) => {
-                                                    tracing::warn!("invalid payload tag, discarding message");
-                                                }
-                                            }
-                                            tracing::debug!("state change <- INITIAL");
-                                            FS::Initial
-                                        } else {
-                                            FS::Salted { cipher, proto: PS::Payload(len) }
-                                        }
-                                    }
-                                }
-                            };
-                            if bit_buffer.len() == bblen_mark {
+                            let bit_buffer_len = bit_buffer.len();
+                            if bit_buffer.len() == bit_buffer_len {
                                 break
                             }
                         }
@@ -640,32 +444,43 @@ async fn raw_bit(resolver: SocketAddr, domain: &Domain<Buffer>, delta: u64, rtt:
     let t1 = Instant::now();
     let query_time = t1 - t0;
     if delta != 0 {
-        tracing::trace!("{domain} qt={query_time:?} ttl={:?}",
+        tracing::trace!("{domain} rc={} qt={query_time:?} ttl={:?}",
+            response.response_code(),
             response.answers().first().map(|a| a.ttl())
         );
     }
     if let Some(ans) = response.answers().first() {
+        // let sussy_neg = [30, 50];
+        let sussy_pos = [60, 100];
+
         let dns_ttl = ans.ttl();
-        if dns_ttl.is_multiple_of(30) || dns_ttl.is_multiple_of(50) {
+
+        // if sussy_neg.iter().any(|t| dns_ttl.is_multiple_of(*t) || (dns_ttl + 1).is_multiple_of(*t)) {
+        //     return false
+        // }
+        if dns_ttl.is_multiple_of(30) || (dns_ttl + 1).is_multiple_of(30) {
             return false
         }
-        let nearest_mul30 = (dns_ttl + 29) / 30 * 30;
-        if (nearest_mul30 - dns_ttl) as u64 > query_time.as_secs() {
-            return true
+        // We forbid the 49/50 cases since, with our delta of 10sec, 60sec TTLs decay to the 50
+        // range, causing false zeroes
+        if (dns_ttl.is_multiple_of(50) || (dns_ttl + 1).is_multiple_of(50)) && (dns_ttl + 49) / 50 > 1 {
+            return false
         }
-        let nearest_mul50 = (dns_ttl + 49) / 50 * 50;
-        if (nearest_mul50 - dns_ttl) as u64 > query_time.as_secs() {
-            return true
+        return sussy_pos.iter().any(|t| {
+            ((dns_ttl + (*t - 1)) / *t * *t) - dns_ttl
+                <=
+            ((query_time.as_millis() + 999) / 1000 * 1000) as u32
+        });
+    }
+    if let Some(soa) = response.soa()
+        // && matches!(response.response_code(), ResponseCode::NXDomain)
+    {
+        tracing::trace!("{domain} SOA.TTL={} SOA.MINIMUM={} delta={}", soa.ttl(), soa.data().minimum(), delta);
+        if soa.ttl().is_multiple_of(30) || soa.ttl().is_multiple_of(50) {
+            return false
         }
+        return (soa.data().minimum() - soa.ttl()) as u64 >= (delta - 2)
     }
-    if let Some(soa) = response.soa() {
-        return (soa.data().minimum() - soa.ttl()) as u64 >= delta
-    }
-    // if response.response_code() == ResponseCode::ServFail {
-    //     return true
-    // }
-    // SOA_MIN-TTL>=delta only works for NXDOMAIN results since those include SOA
-    // let soa = response.soa().unwrap().to_owned();
-    // (soa.data().minimum() - soa.ttl()) as u64 >= delta
+    // CASE: ServFail - no information can be extracted, so just ignore it
     query_time <= rtt
 }
