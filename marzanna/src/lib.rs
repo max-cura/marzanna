@@ -14,14 +14,12 @@ use serde::{Deserialize, Serialize};
 
 pub mod bits;
 pub mod codec;
-// pub mod driver;
 pub mod protocol;
 pub mod sequencer;
 mod serde_chacha;
 pub mod session;
 
 use crate::sequencer::ortho::{DynDomainSequencer, DynTimeSequencer};
-// use sequencer::{DynSequencerCore, SequencerCore as _};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Rendezvous {
