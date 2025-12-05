@@ -1,5 +1,6 @@
 #![feature(iter_array_chunks)]
 #![feature(vec_deque_truncate_front)]
+extern crate core;
 
 mod open;
 mod init;

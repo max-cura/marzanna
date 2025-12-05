@@ -199,6 +199,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46c5e41b57b8bba42a04676d81cb89e9ee8e859a1a66f80a5a72e1cb76b34d43"
 
 [[package]]
+name = "bytemuck"
+version = "1.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fbdf580320f38b612e485521afda1ee26d10cc9884efaaa750d383e13e3c5f4"
+
+[[package]]
 name = "bytes"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1059,6 +1065,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "labrador-ldpc"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52bbada3351e4ae9078bcd095b83eac3a0bc29ed7d63031f062830f8f22485a4"
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1200,6 +1212,7 @@ name = "mzna"
 version = "0.1.0"
 dependencies = [
  "aes-gcm-siv",
+ "bytemuck",
  "bytes",
  "chrono",
  "clap",
@@ -1212,6 +1225,7 @@ dependencies = [
  "hickory-resolver",
  "hkdf",
  "hostaddr",
+ "labrador-ldpc",
  "marzanna",
  "ordinal",
  "rand",

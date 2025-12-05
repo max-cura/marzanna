@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use hostaddr::{Buffer, Domain};
 use serde::{Deserialize, Serialize};
 
-mod bits;
+pub mod bits;
 pub mod codec;
 // pub mod driver;
 pub mod protocol;
