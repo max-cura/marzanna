@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SessionConfig {
@@ -17,9 +19,10 @@ struct SessionConfig {
 
     sequencer_alice: Sequencer,
     sequencer_bob: Sequencer,
-    codec: DynCodec,
 
-    shared_key: String,
+    root_key: String,
+    #[serde(with = "crate::serde_chacha")]
+    cell_stream_cipher: ChaCha20Rng,
 
     ttl_cache: HashMap<String, Ttl>,
 }
@@ -29,8 +32,8 @@ impl From<Session> for SessionConfig {
             epoch,
             sequencer_alice,
             sequencer_bob,
-            codec,
-            shared_key,
+            root_key: shared_key,
+            cell_stream_cipher,
             resolver,
             rtt,
             ttl_cache,
@@ -40,8 +43,8 @@ impl From<Session> for SessionConfig {
             epoch,
             sequencer_alice,
             sequencer_bob,
-            codec,
-            shared_key,
+            root_key: shared_key,
+            cell_stream_cipher,
             resolver,
             rtt,
             ttl_cache,
@@ -56,8 +59,8 @@ impl TryFrom<SessionConfig> for Session {
             epoch,
             sequencer_alice,
             sequencer_bob,
-            codec,
-            shared_key,
+            root_key: shared_key,
+            cell_stream_cipher,
             resolver,
             rtt,
             ttl_cache,
@@ -69,8 +72,8 @@ impl TryFrom<SessionConfig> for Session {
             epoch,
             sequencer_alice,
             sequencer_bob,
-            codec,
-            shared_key,
+            root_key: shared_key,
+            cell_stream_cipher,
             resolver,
             rtt,
             ttl_cache,
@@ -84,8 +87,8 @@ pub struct Session {
     epoch: DateTime<Utc>,
     sequencer_alice: Sequencer,
     sequencer_bob: Sequencer,
-    codec: DynCodec,
-    shared_key: Vec<u8>,
+    root_key: Vec<u8>,
+    cell_stream_cipher: ChaCha20Rng,
     resolver: SocketAddr,
     rtt: Duration,
     ttl_cache: HashMap<String, Ttl>,
@@ -108,7 +111,7 @@ impl Session {
         sequencer_alice: Sequencer,
         sequencer_bob: Sequencer,
         codec: DynCodec,
-        shared_key: Vec<u8>,
+        root_key: Vec<u8>,
         resolver: SocketAddr,
         rtt: Duration,
     ) -> Self {
@@ -116,8 +119,8 @@ impl Session {
             epoch,
             sequencer_alice,
             sequencer_bob,
-            codec,
-            shared_key,
+            root_key,
+            cell_stream_cipher: ChaCha20Rng::from_os_rng(),
             resolver,
             ttl_cache: HashMap::new(),
             rtt,
@@ -217,14 +220,14 @@ impl Session {
         //     self.ttl_cache.insert(s, Utc::now() + ttl_sec)
         // }
     }
-    pub fn codec_mut(&mut self) -> &mut DynCodec {
-        &mut self.codec
+    pub fn cell_stream_cipher_mut(&mut self) -> &mut ChaCha20Rng {
+        &mut self.cell_stream_cipher
     }
     pub fn resolver(&self) -> SocketAddr {
         self.resolver
     }
     pub fn shared_key(&self) -> &[u8] {
-        &self.shared_key
+        &self.root_key
     }
     pub fn rtt(&self) -> Duration {
         self.rtt

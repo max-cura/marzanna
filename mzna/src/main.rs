@@ -13,9 +13,6 @@ async fn main() -> eyre::Result<()> {
     color_eyre::install()?;
 
     match args.invocation {
-        // Invocation::Session(opts) => session::invoke(opts).await,
-        // Invocation::Client(opts) => client::invoke(opts).await,
-        // Invocation::Server(opts) => server::invoke(opts).await,
         Invocation::Init(opts) => {init::invoke(opts).await}
         Invocation::Open(opts) => {open::invoke(opts).await}
     }
@@ -30,9 +27,6 @@ struct Opts {
 
 #[derive(Debug, Subcommand)]
 enum Invocation {
-    // Session(session::Opts),
-    // Client(client::Opts),
-    // Server(server::Opts),
     Init(init::Opts),
     Open(open::Opts),
 }

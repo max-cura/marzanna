@@ -14,6 +14,8 @@ use labrador_ldpc::LDPCCode;
 use marzanna::Rendezvous;
 use marzanna::codec::{Codec, Simple1x1};
 use marzanna::session::{Party, Session};
+use rand::RngCore;
+use rand_chacha::ChaCha20Rng;
 use rustyline_async::{Readline, ReadlineEvent, SharedWriter};
 use sha2::Sha256;
 use std::collections::{BTreeMap, VecDeque};
@@ -248,7 +250,11 @@ fn drive_protocol(
                             OutgoingMsg::Msg(mut bytes) => {
                                 while !bytes.is_empty() {
                                     let frame_payload = bytes.split_to(15.min(bytes.len()));
-                                    let bits = encode_frame(out_frame_id, session.shared_key(), frame_payload);
+                                    let bits = encode_frame(
+                                        &mut session.cell_stream_cipher_mut().clone(),
+                                        out_frame_id,
+                                        session.shared_key(),
+                                        frame_payload);
                                     frame_seq.push_back((out_frame_id as usize, bits));
                                     out_frame_id += 1;
                                 }
@@ -286,14 +292,23 @@ fn drive_protocol(
                         }
                     }
                     while bit_buffer.len() > (FRAME_SIZE * u8::BITS as usize) {
-                        let frame_bits = bit_buffer.drain(..FRAME_SIZE * u8::BITS as usize).collect::<Vec<_>>();
-                        let mut frame = BytesMut::new();
-                        Simple1x1.decode(&frame_bits, &mut frame);
-                        tracing::info!("recv frame raw: {}", hex::encode(&frame));
+                        let cell_bits = bit_buffer.drain(..FRAME_SIZE * u8::BITS as usize).collect::<Vec<_>>();
+                        let mut cell = BytesMut::new();
+                        Simple1x1.decode(&cell_bits, &mut cell);
+                        tracing::info!("recv frame raw: {}", hex::encode(&cell));
 
-                        assert_eq!(frame.len(), 64);
+                        let mut xor = [0u8; 64];
+                        session.cell_stream_cipher_mut().set_word_pos(recv_frame_id as u128 * 16);
+                        session.cell_stream_cipher_mut().fill_bytes(&mut xor);
+                        assert_eq!(session.cell_stream_cipher_mut().get_word_pos(), (recv_frame_id as u128 + 1) * 16);
+                        assert_eq!(xor.len(), cell.len());
+                        for (i, b) in cell.as_mut().iter_mut().enumerate() {
+                            *b ^= xor[i];
+                        }
+
+                        assert_eq!(cell.len(), 64);
                         let mut llrs = vec![0i8; LDPCCode::TC512.n()];
-                        LDPCCode::TC512.hard_to_llrs(frame.as_ref(), &mut llrs);
+                        LDPCCode::TC512.hard_to_llrs(cell.as_ref(), &mut llrs);
                         let mut working_u8 = vec![0u8; LDPCCode::TC512.decode_ms_working_u8_len()];
                         let mut working = vec![0i8; LDPCCode::TC512.decode_ms_working_len()];
                         let mut output = vec![0u8; LDPCCode::TC512.output_len()];
@@ -315,7 +330,7 @@ fn drive_protocol(
                             }
                         }
 
-                        if let Err(_) = in_msg_tx.send(IncomingMsg::Msg(frame.freeze())) {
+                        if let Err(_) = in_msg_tx.send(IncomingMsg::Msg(cell.freeze())) {
                             tracing::error!("incoming message queue closed, stopping protocol driver.");
                             break 'outer
                         }
@@ -342,7 +357,12 @@ fn derive_cipher(frame_id: u64, key: &[u8]) -> Aes256GcmSiv {
     Aes256GcmSiv::new(&key)
 }
 
-fn encode_frame(frame_id: u64, key: &[u8], payload: Bytes) -> Vec<bool> {
+fn encode_frame(
+    cell_stream_cipher: &mut ChaCha20Rng,
+    frame_id: u64,
+    key: &[u8],
+    payload: Bytes,
+) -> Vec<bool> {
     let payload_len = payload.len();
     assert!(payload_len <= 15);
 
@@ -370,7 +390,21 @@ fn encode_frame(frame_id: u64, key: &[u8], payload: Bytes) -> Vec<bool> {
 
     tracing::debug!("send frame: {}", hex::encode(&cipher_bytes));
 
+    // Cells are 512 bits = 64 bytes
+    let mut xor = [0u8; 64];
+    cell_stream_cipher.set_word_pos(frame_id as u128 * 16);
+    cell_stream_cipher.fill_bytes(&mut xor);
+    assert_eq!(
+        cell_stream_cipher.get_word_pos(),
+        (frame_id as u128 + 1) * 16
+    );
+    assert_eq!(xor.len(), cipher_bytes.len());
+    for (i, b) in cipher_bytes.as_mut().iter_mut().enumerate() {
+        *b ^= xor[i];
+    }
+
     let mut bits = vec![false; Simple1x1.required_bits(cipher_bytes.len())];
+
     Simple1x1.encode(&cipher_bytes.into(), &mut bits);
     bits
 }
