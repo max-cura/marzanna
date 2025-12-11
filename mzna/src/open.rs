@@ -1,5 +1,5 @@
+use aes_gcm_siv::Aes256GcmSiv;
 use aes_gcm_siv::aead::Aead;
-use aes_gcm_siv::{Aes256GcmSiv, Key, KeyInit};
 use bytes::{BufMut, Bytes, BytesMut};
 use chrono::Utc;
 use clap::Args;
@@ -8,7 +8,6 @@ use hickory_client::client::{Client, ClientHandle};
 use hickory_client::proto::rr::{DNSClass, Name, RecordType};
 use hickory_client::proto::runtime::TokioRuntimeProvider;
 use hickory_client::proto::udp::UdpClientStream;
-use hkdf::Hkdf;
 use hostaddr::{Buffer, Domain};
 use labrador_ldpc::LDPCCode;
 use marzanna::Rendezvous;
@@ -17,8 +16,8 @@ use marzanna::session::{Party, Session};
 use rand::RngCore;
 use rand_chacha::ChaCha20Rng;
 use rustyline_async::{Readline, ReadlineEvent, SharedWriter};
-use sha2::Sha256;
 use std::collections::{BTreeMap, VecDeque};
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -27,8 +26,12 @@ use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::MakeWriter;
+use tracing::Level;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::fmt::{MakeWriter, layer};
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
+use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 #[derive(Debug, Args)]
 pub struct Opts {
@@ -39,6 +42,11 @@ pub struct Opts {
 
     #[arg(long)]
     local_socket: Option<PathBuf>,
+
+    #[arg(long)]
+    log_main: PathBuf,
+    #[arg(long)]
+    log_machine: PathBuf,
 }
 impl Opts {
     pub(crate) fn parties(&self) -> (Party, Party) {
@@ -50,11 +58,53 @@ impl Opts {
     }
 }
 
+const PEWTER: &'static str = "pewter";
+
 pub async fn invoke(opts: Opts) -> eyre::Result<()> {
     let session_file_contents =
         std::fs::read_to_string(&opts.session).wrap_err("failed to read session file")?;
     let mut session: Session =
         serde_json::from_str(&session_file_contents).wrap_err("failed to parse session file")?;
+
+    let file_gen = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&opts.log_main)
+        .wrap_err(eyre::eyre!(
+            "human-readable log file {} could not be created",
+            opts.log_machine.display()
+        ))?;
+    let file_targ = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&opts.log_machine)
+        .wrap_err(eyre::eyre!(
+            "machine-readable log file {} could not be created",
+            opts.log_machine.display()
+        ))?;
+
+    let (nb_gen, _guard_gen) = tracing_appender::non_blocking(file_gen);
+    let (nb_targ, _guard_targ) = tracing_appender::non_blocking(file_targ);
+
+    Registry::default()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(nb_gen)
+                // .flatten_event(true)
+                .with_filter(EnvFilter::from_default_env()),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(nb_targ)
+                .json()
+                .with_filter(Targets::new().with_target(PEWTER, Level::INFO)),
+        )
+        .try_init()
+        .wrap_err(eyre::eyre!(
+            "failed to initialize tracing-subscriber Registry"
+        ))?;
 
     let (out_msg_tx, out_msg_rx) = unbounded_channel();
     let (in_msg_tx, in_msg_rx) = unbounded_channel();
@@ -83,26 +133,26 @@ fn drive_stdio(
 ) -> JoinHandle<()> {
     let (mut rl, mut stdout) =
         Readline::new("\x1b[33m>\x1b[0m ".into()).expect("failed to create readline");
-    struct SharedWriterWrapper(SharedWriter);
-    impl<'a> MakeWriter<'a> for SharedWriterWrapper {
-        type Writer = SharedWriter;
+    // struct SharedWriterWrapper(SharedWriter);
+    // impl<'a> MakeWriter<'a> for SharedWriterWrapper {
+    //     type Writer = SharedWriter;
 
-        fn make_writer(&'a self) -> Self::Writer {
-            self.0.clone()
-        }
-    }
-    tracing_subscriber::fmt()
-        .with_writer(SharedWriterWrapper(stdout.clone()))
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    //     fn make_writer(&'a self) -> Self::Writer {
+    //         self.0.clone()
+    //     }
+    // }
+    // tracing_subscriber::fmt()
+    //     .with_writer(SharedWriterWrapper(stdout.clone()))
+    //     .with_env_filter(EnvFilter::from_default_env())
+    //     .init();
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 msg = msg_rx.recv() => {
                     match msg {
                         Some(IncomingMsg::Msg(bytes)) => {
-                            let _ = writeln!(stdout, "{:02x?}", hex::encode(&bytes));
-                            let _ = writeln!(stdout, "{}", String::from_utf8_lossy(bytes.as_ref()));
+                            let _ = writeln!(stdout, "Received message: {}", hex::encode(&bytes));
+                            let _ = writeln!(stdout, "(as ASCII): {}", String::from_utf8_lossy(bytes.as_ref()));
                         }
                         // Some(IncomingMsg::Miss { receiving_party,rendezvous_idx,rendezvous_time: _,arrival_time: _ }) => {
                         //     // tracing::warn!("missed {} {} window",
@@ -182,11 +232,11 @@ fn drive_protocol(
         let mut bit_buffer: VecDeque<bool> = VecDeque::new();
         let mut receive_ahead: BTreeMap<usize, bool> = BTreeMap::new();
 
-        const FRAME_SIZE: usize = 64usize;
-        let mut frame_seq: VecDeque<(usize, Vec<bool>)> = VecDeque::new();
-        let mut out_frame_id = 0;
-        let mut send_frame_id = 0;
-        let mut recv_frame_id = 0;
+        const CELL_SIZE: usize = 64usize;
+        let mut cell_seq: VecDeque<(usize, Vec<bool>)> = VecDeque::new();
+        let mut out_cell_id = 0;
+        let mut send_cell_id = 0;
+        let mut recv_cell_id = 0;
 
         let mut my_next_recv;
         let mut their_next_recv;
@@ -223,23 +273,23 @@ fn drive_protocol(
 
             tokio::select! {
                 _ = sleep_recv => {
-                    session.commit_rendezvous(self_party);
+                    session.commit_materialized_rendezvous(self_party);
                     tokio::spawn(raw_read_bit(session.resolver(), incoming_tx.clone(), my_next_recv, session.rtt()));
                 }
                 _ = sleep_send => {
-                    session.commit_rendezvous(other_party);
+                    session.commit_materialized_rendezvous(other_party);
                     if send_buffer.is_empty() {
                         assert!(their_next_recv.idx().is_multiple_of(512));
-                        if let Some(frame) = frame_seq.front() && frame.0 == send_frame_id {
-                            send_buffer = frame_seq.pop_front().unwrap().1.into();
+                        if let Some(frame) = cell_seq.front() && frame.0 == send_cell_id {
+                            send_buffer = cell_seq.pop_front().unwrap().1.into();
                         } else {
-                            while let Some(frame) = frame_seq.front() && frame.0 < send_frame_id {
-                                tracing::warn!("DISCARDING FRAME {}", frame.0);
-                                let _ = frame_seq.pop_front();
+                            while let Some(cell) = cell_seq.front() && cell.0 < send_cell_id {
+                                tracing::warn!("DISCARDING CELL {}", cell.0);
+                                let _ = cell_seq.pop_front();
                             }
-                            send_buffer = vec![false; FRAME_SIZE * u8::BITS as usize].into();
+                            send_buffer = vec![false; CELL_SIZE * u8::BITS as usize].into();
                         }
-                        send_frame_id += 1
+                        send_cell_id += 1
                     }
                     let bit = send_buffer.pop_front().unwrap();
                     tokio::spawn(raw_write_bit(session.resolver(), bit, their_next_recv));
@@ -250,13 +300,13 @@ fn drive_protocol(
                             OutgoingMsg::Msg(mut bytes) => {
                                 while !bytes.is_empty() {
                                     let frame_payload = bytes.split_to(15.min(bytes.len()));
-                                    let bits = encode_frame(
-                                        &mut session.cell_stream_cipher_mut().clone(),
-                                        out_frame_id,
-                                        session.shared_key(),
+                                    let bits = build_cell(
+                                        session.derive_per_cell_key(out_cell_id),
+                                        session.cell_stream_cipher_mut(),
+                                        out_cell_id,
                                         frame_payload);
-                                    frame_seq.push_back((out_frame_id as usize, bits));
-                                    out_frame_id += 1;
+                                    cell_seq.push_back((out_cell_id as usize, bits));
+                                    out_cell_id += 1;
                                 }
                             }
                             OutgoingMsg::Close => {
@@ -291,20 +341,21 @@ fn drive_protocol(
                             break
                         }
                     }
-                    while bit_buffer.len() > (FRAME_SIZE * u8::BITS as usize) {
-                        let cell_bits = bit_buffer.drain(..FRAME_SIZE * u8::BITS as usize).collect::<Vec<_>>();
+                    while bit_buffer.len() > (CELL_SIZE * u8::BITS as usize) {
+                        let cell_bits = bit_buffer.drain(..CELL_SIZE * u8::BITS as usize).collect::<Vec<_>>();
                         let mut cell = BytesMut::new();
                         Simple1x1.decode(&cell_bits, &mut cell);
-                        tracing::info!("recv frame raw: {}", hex::encode(&cell));
+                        tracing::info!("raw cell: {}", hex::encode(&cell));
 
                         let mut xor = [0u8; 64];
-                        session.cell_stream_cipher_mut().set_word_pos(recv_frame_id as u128 * 16);
+                        session.cell_stream_cipher_mut().set_word_pos(recv_cell_id as u128 * 16);
                         session.cell_stream_cipher_mut().fill_bytes(&mut xor);
-                        assert_eq!(session.cell_stream_cipher_mut().get_word_pos(), (recv_frame_id as u128 + 1) * 16);
+                        assert_eq!(session.cell_stream_cipher_mut().get_word_pos(), (recv_cell_id as u128 + 1) * 16);
                         assert_eq!(xor.len(), cell.len());
                         for (i, b) in cell.as_mut().iter_mut().enumerate() {
                             *b ^= xor[i];
                         }
+                        tracing::info!("outer-unencrypted cell: {}", hex::encode(&cell));
 
                         assert_eq!(cell.len(), 64);
                         let mut llrs = vec![0i8; LDPCCode::TC512.n()];
@@ -314,25 +365,29 @@ fn drive_protocol(
                         let mut output = vec![0u8; LDPCCode::TC512.output_len()];
                         let (ok, iter) = LDPCCode::TC512.decode_ms(&llrs, &mut output, &mut working, &mut working_u8, 128);
 
-                        tracing::info!("recv frame (corrected={ok:?} after {iter}): {}", hex::encode(&output));
+                        tracing::info!("decoded cell (decoded={ok:?} after {iter}): {}", hex::encode(&output));
 
-                        let cipher = derive_cipher(recv_frame_id, session.shared_key());
-                        recv_frame_id += 1;
-                        match cipher.decrypt(b"12byte_nonce".into(), &output[..32]) {
-                            Ok(pt) => {
-                                if let Err(_) = in_msg_tx.send(IncomingMsg::Msg(pt.into())) {
-                                    tracing::debug!("incoming message queue closed, stopping protocol driver task");
-                                    break 'outer
+                        if ok {
+                            let cipher = session.derive_per_cell_key(recv_cell_id);
+                            recv_cell_id += 1;
+                            match cipher.decrypt(b"12byte_nonce".into(), &output[..32]) {
+                                Ok(pt) => {
+                                    if let Err(_) = in_msg_tx.send(IncomingMsg::Msg(pt.into())) {
+                                        tracing::debug!("incoming message queue closed, stopping protocol driver task");
+                                        break 'outer
+                                    }
+                                }
+                                Err(aes_gcm_siv::aead::Error) => {
+                                    tracing::warn!("invalid payload tag, discarding message");
                                 }
                             }
-                            Err(aes_gcm_siv::aead::Error) => {
-                                tracing::warn!("invalid payload tag, discarding message");
-                            }
-                        }
 
-                        if let Err(_) = in_msg_tx.send(IncomingMsg::Msg(cell.freeze())) {
-                            tracing::error!("incoming message queue closed, stopping protocol driver.");
-                            break 'outer
+                            if let Err(_) = in_msg_tx.send(IncomingMsg::Msg(cell.freeze())) {
+                                tracing::error!("incoming message queue closed, stopping protocol driver.");
+                                break 'outer
+                            }
+                        } else {
+                            tracing::error!("failed to decode cell!");
                         }
                     }
                 }
@@ -344,23 +399,10 @@ fn drive_protocol(
     handle
 }
 
-fn derive_cipher(frame_id: u64, key: &[u8]) -> Aes256GcmSiv {
-    let mut okm = [0u8; 42];
-    let salt: [u8; 16] = (frame_id as u128).to_le_bytes();
-    let derived = Hkdf::<Sha256>::new(Some(&salt[..]), key);
-    derived
-        .expand(b"derived", &mut okm)
-        .expect("42 is a valid length for Sha256 to output");
-    let mut key_bits = [0u8; 32];
-    key_bits[..32].copy_from_slice(&okm[..32]);
-    let key = Key::<Aes256GcmSiv>::from(key_bits);
-    Aes256GcmSiv::new(&key)
-}
-
-fn encode_frame(
+fn build_cell(
+    cipher: Aes256GcmSiv,
     cell_stream_cipher: &mut ChaCha20Rng,
-    frame_id: u64,
-    key: &[u8],
+    cell_id: u64,
     payload: Bytes,
 ) -> Vec<bool> {
     let payload_len = payload.len();
@@ -373,7 +415,6 @@ fn encode_frame(
         frame.put_u8(0);
     }
 
-    let cipher = derive_cipher(frame_id, key);
     let mut cipher_bytes = BytesMut::from(Bytes::from(
         cipher
             .encrypt(
@@ -388,20 +429,25 @@ fn encode_frame(
 
     LDPCCode::TC512.encode(cipher_bytes.as_mut());
 
-    tracing::debug!("send frame: {}", hex::encode(&cipher_bytes));
+    tracing::info!("coded, AEAD-encrypted cell: {}", hex::encode(&cipher_bytes));
 
     // Cells are 512 bits = 64 bytes
     let mut xor = [0u8; 64];
-    cell_stream_cipher.set_word_pos(frame_id as u128 * 16);
+    cell_stream_cipher.set_word_pos(cell_id as u128 * 16);
     cell_stream_cipher.fill_bytes(&mut xor);
     assert_eq!(
         cell_stream_cipher.get_word_pos(),
-        (frame_id as u128 + 1) * 16
+        (cell_id as u128 + 1) * 16
     );
     assert_eq!(xor.len(), cipher_bytes.len());
     for (i, b) in cipher_bytes.as_mut().iter_mut().enumerate() {
         *b ^= xor[i];
     }
+
+    tracing::info!(
+        "encrypted, coded, AEAD-encrypted cell: {}",
+        hex::encode(&cipher_bytes)
+    );
 
     let mut bits = vec![false; Simple1x1.required_bits(cipher_bytes.len())];
 

@@ -1,6 +1,5 @@
 //! Serialization for [`ChaCha20Rng`], for use with `#[serde(with="serde_chacha")]`.
 
-use base64::{Engine as _, prelude::BASE64_STANDARD};
 use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
@@ -22,9 +21,9 @@ where
         chacha.get_word_pos(),
     );
     let v = Vehicle {
-        seed: BASE64_STANDARD.encode(seed),
+        seed: hex::encode(seed),
         stream: stream,
-        word_pos: BASE64_STANDARD.encode(word_pos.to_le_bytes()),
+        word_pos: hex::encode(word_pos.to_le_bytes()),
     };
     v.serialize(serializer)
 }
@@ -34,18 +33,14 @@ where
 {
     let v = Vehicle::deserialize(deserializer)?;
     let (seed, stream, word_pos) = (
-        *BASE64_STANDARD
-            .decode(v.seed)
-            .map_err(|e| D::Error::custom(format!("chacha8 seed must be base64-encoded: {e:?}")))?
+        *hex::decode(v.seed)
+            .map_err(|e| D::Error::custom(format!("chacha8 seed must be hex-encoded: {e:?}")))?
             .as_array::<32>()
             .ok_or(D::Error::custom("chacha8 seed must be 32 bytes"))?,
         v.stream,
-        *BASE64_STANDARD
-            .decode(v.word_pos)
+        *hex::decode(v.word_pos)
             .map_err(|e| {
-                D::Error::custom(format!(
-                    "chacha8 word position must be base64-encoded: {e:?}"
-                ))
+                D::Error::custom(format!("chacha8 word position must be hex-encoded: {e:?}"))
             })?
             .as_array::<16>()
             .ok_or(D::Error::custom("chacha8 word position must be 16 bytes"))?,

@@ -10,15 +10,12 @@ clap = { version = "4.5.53", features = ["derive"] }
 color-eyre = "0.6.5"
 eyre = "0.6.12"
 fundu = { version = "2.0.1", features = ["chrono"] }
-futures = "0.3.31"
 hickory-client = "0.25.2"
-hickory-resolver = "0.25.2"
 marzanna = { path = "../marzanna" }
 serde_json = "1.0.145"
 tokio = { version = "1.48.0", features = ["net", "time", "rt", "macros", "rt-multi-thread", "signal", "sync"] }
-tokio-stream = { version = "0.1.17", features = ["net", "signal", "sync"] }
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.20", features = ["chrono", "env-filter", "json"] }
 hostaddr = "0.2.3"
 aes-gcm-siv = "0.11.1"
 hkdf = "0.12.4"
@@ -26,7 +23,6 @@ rand = "0.9.2"
 rand_chacha = "0.9.0"
 sha2 = "0.10.9"
 rustyline-async = "0.4.7"
-ordinal = "0.4.0"
 hex = "0.4.3"
 labrador-ldpc = "1.2.1"
-bytemuck = "1.24.0"
+tracing-appender = "0.2.4"

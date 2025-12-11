@@ -1,4 +1,4 @@
-use crate::sequencer::{DnsAlphabet, ortho::DomainSequencer};
+use crate::sequencer::{DnsAlphabet, DomainSequencer};
 use hostaddr::{Buffer, Domain};
 use rand::{Rng as _, SeedableRng as _};
 use rand_chacha::ChaCha20Rng;

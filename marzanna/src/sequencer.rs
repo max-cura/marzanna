@@ -1,9 +1,16 @@
-// use chrono::{DateTime, Utc};
-// use enum_dispatch::enum_dispatch;
 use rand::distr::Distribution;
 
-// use crate::Rendezvous;
-// use ortho::Ortho;
+use chrono::{DateTime, Utc};
+use enum_dispatch::enum_dispatch;
+use hostaddr::{Buffer, Domain};
+use serde::{Deserialize, Serialize};
+
+pub mod domain;
+pub mod time;
+
+use domain::UniformNSL;
+use domain::WeightedList;
+use time::UniformOffset;
 
 pub struct DnsAlphabet;
 impl Distribution<u8> for DnsAlphabet {
@@ -14,22 +21,33 @@ impl Distribution<u8> for DnsAlphabet {
     }
 }
 
-// #[enum_dispatch]
-// #[derive(Debug, Clone, Serialize, Deserialize)]
-// pub enum DynSequencerCore {
-//     Ortho,
-// }
-//
-// /// Trait for sequencer implementations. API is unstable. Should only be used by way of a
-// /// [`Sequencer`].
-// #[enum_dispatch(DynSequencerCore)]
-// pub trait SequencerCore: Send {
-//     fn materialize_rendezvous_sequence(
-//         &mut self,
-//         epoch: DateTime<Utc>,
-//         count_hint: usize,
-//     ) -> Vec<Rendezvous>;
-// }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Timepoint {
+    pub can_write_at: DateTime<Utc>,
+    pub write_by: DateTime<Utc>,
+    pub can_read_at: DateTime<Utc>,
+    pub read_by: DateTime<Utc>,
+}
 
-pub mod ortho;
+#[enum_dispatch]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "name")]
+pub enum DynTimeSequencer {
+    UniformOffset,
+}
+#[enum_dispatch(DynTimeSequencer)]
+pub trait TimeSequencer: Send {
+    fn next_time(&mut self, epoch: DateTime<Utc>) -> Timepoint;
+}
 
+#[enum_dispatch]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "name")]
+pub enum DynDomainSequencer {
+    UniformNSL,
+    WeightedList,
+}
+#[enum_dispatch(DynDomainSequencer)]
+pub trait DomainSequencer: Send {
+    fn next_domain(&mut self) -> (Domain<Buffer>, u64);
+}

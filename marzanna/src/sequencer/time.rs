@@ -3,7 +3,9 @@ use rand::{Rng as _, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::sequencer::ortho::TimeSequencer;
+use crate::sequencer::Timepoint;
+
+use super::TimeSequencer;
 
 #[derive(Debug, Deserialize)]
 struct UnvalidatedUniformOffset {
@@ -57,7 +59,7 @@ impl UniformOffset {
     }
 }
 impl TimeSequencer for UniformOffset {
-    fn next_time(&mut self, epoch: DateTime<Utc>) -> [DateTime<Utc>; 4] {
+    fn next_time(&mut self, epoch: DateTime<Utc>) -> Timepoint {
         if self.subsec >= self.subsec_to {
             let sec_offset_distr = rand::distr::Uniform::new(self.min_sec, self.max_sec)
                 .expect("invalid uniform-offset configuration: min_sec>=max_sec");
@@ -70,11 +72,11 @@ impl TimeSequencer for UniformOffset {
         }
         let td_offset = TimeDelta::seconds(self.last.try_into().expect("time offset out of range"));
         let per_start = epoch + td_offset;
-        [
-            per_start,
-            per_start + TimeDelta::seconds(1),
-            per_start + TimeDelta::seconds(1 + self.delay as i64),
-            per_start + TimeDelta::seconds(1 + self.delay as i64 + 1),
-        ]
+        Timepoint {
+            can_write_at: per_start,
+            write_by: per_start + TimeDelta::seconds(1),
+            can_read_at: per_start + TimeDelta::seconds(1 + self.delay as i64),
+            read_by: per_start + TimeDelta::seconds(1 + self.delay as i64 + 1),
+        }
     }
 }
