@@ -5,7 +5,12 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "altair>=6.0.0",
+    "matplotlib>=3.10.8",
+    "numpy>=2.3.5",
     "polars>=1.35.2",
     "ruff>=0.14.8",
+    "scapy>=2.6.1",
     "torch>=2.9.1",
+    "vl-convert-python>=1.8.0",
 ]
